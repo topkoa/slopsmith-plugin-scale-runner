@@ -493,11 +493,31 @@
         return obstacleMeta.find(m => !m.judged && Math.abs(m.arrivalTime - t) < 1e-3) || null;
     }
 
+    // De-dupe between srRoot bubble and window dispatch (note_detect fires
+    // on both). Use the judgment's `judgedAt` as a stable key.
+    const _judgedSeen = new Set();
+    function _seenJudgment(d) {
+        const k = (d.judgedAt ?? 0) + ':' + (d.noteTime ?? 0) + ':' + (d.matched ? 'H' : 'M');
+        if (_judgedSeen.has(k)) return true;
+        _judgedSeen.add(k);
+        // Bound the set so a long session doesn't leak.
+        if (_judgedSeen.size > 256) {
+            const it = _judgedSeen.values();
+            _judgedSeen.delete(it.next().value);
+        }
+        return false;
+    }
+    function onHitWindow(e)  { if (_seenJudgment(e.detail)) return; onHit(e); }
+    function onMissWindow(e) { if (_seenJudgment(e.detail)) return; onMiss(e); }
+
     function onHit(e) {
         if (gameState !== 'playing') return;
         const d = e.detail;
+        console.log('[scale_runner] hit event', { noteTime: d.noteTime, note: d.note, detectedMidi: d.detectedMidi, expectedMidi: d.expectedMidi });
+        // Window-source events arrive without going through the bubble
+        // de-dupe, so we tag them at the source above.
         const meta = findObstacleForJudgment(d);
-        if (!meta) return;
+        if (!meta) { console.warn('[scale_runner] hit had no matching obstacle for noteTime', d.noteTime); return; }
         meta.judged = 'hit';
         stats.combo++;
         stats.hits++;
@@ -514,8 +534,9 @@
     function onMiss(e) {
         if (gameState !== 'playing') return;
         const d = e.detail;
+        console.log('[scale_runner] miss event', { noteTime: d.noteTime, note: d.note, detectedMidi: d.detectedMidi, expectedMidi: d.expectedMidi });
         const meta = findObstacleForJudgment(d);
-        if (!meta) return;
+        if (!meta) { console.warn('[scale_runner] miss had no matching obstacle for noteTime', d.noteTime); return; }
         meta.judged = 'miss';
         stats.combo = 0;
         stats.misses++;
@@ -635,14 +656,61 @@
             // cadence + lives only.
             srRoot.addEventListener('notedetect:hit',  onHit);
             srRoot.addEventListener('notedetect:miss', onMiss);
+            // Paranoia: also listen on window in case the per-instance
+            // dispatch doesn't reach srRoot (different DOM parent for the
+            // detector's internal `instanceRoot`).
+            window.addEventListener('notedetect:hit',  onHitWindow);
+            window.addEventListener('notedetect:miss', onMissWindow);
         }
+
+        // Diagnostic: dump the bridge + detector state before enabling so
+        // a "no hits firing" report is actionable. Audio flows through the
+        // desktop JUCE bridge (note_detect/screen.js:1797), NOT getUserMedia,
+        // when running inside slopsmith-desktop — so the engine needs an
+        // input device picked + to be running.
+        const desktop = window.slopsmithDesktop;
+        const diag = {
+            isDesktop: !!(desktop && desktop.isDesktop),
+            hasAudioBridge: !!(desktop && desktop.audio),
+            hasGetPitchDetection: !!(desktop && desktop.audio && desktop.audio.getPitchDetection),
+        };
+        if (diag.hasAudioBridge) {
+            try { diag.engineRunning = await desktop.audio.isAudioRunning?.(); } catch (e) {}
+            try { diag.engineAvailable = await desktop.audio.isAvailable?.(); } catch (e) {}
+            try { diag.mlActive = await desktop.audio.isMlNoteDetection?.(); } catch (e) {}
+        }
+        console.log('[scale_runner] audio bridge state:', diag);
+        if (diag.isDesktop && !diag.engineRunning) {
+            console.warn('[scale_runner] JUCE audio engine is not running. Open the 🎸 Audio panel, pick an input device, and click Start before launching Scale Runner.');
+        }
+
         try {
+            console.log('[scale_runner] calling detector.enable()…');
             await detector.enable();
+            console.log('[scale_runner] detector enabled. isEnabled:', detector.isEnabled?.());
         } catch (e) {
             alert('Microphone permission is required to play. ' + (e?.message || ''));
             setState('start');
             return;
         }
+
+        // Expose for browser-console debugging — `window._scaleRunnerDebug()`
+        // dumps current game state.
+        window._scaleRunnerDebug = () => ({
+            gameClockSec,
+            gameState,
+            stats,
+            syntheticNotes: syntheticNotes.slice(0, 5),
+            obstacleMeta: obstacleMeta.map(m => ({
+                degree: m.degree, midi: m.midi, t: m.arrivalTime,
+                spawned: m.spawned, judged: m.judged,
+                z: m.mesh?.position?.x,
+            })),
+            activeObstacles: activeObstacles.length,
+            detector: detector ? { isEnabled: detector.isEnabled?.() } : null,
+            windowNoteDetect: window.noteDetect ? { isEnabled: window.noteDetect.isEnabled?.() } : null,
+            desktopBridge: diag,
+        });
 
         gameState = 'playing';
         setState('playing');
@@ -755,6 +823,8 @@
         // Listeners on srRoot — safe to remove even if never attached.
         srRoot.removeEventListener('notedetect:hit',  onHit);
         srRoot.removeEventListener('notedetect:miss', onMiss);
+        window.removeEventListener('notedetect:hit',  onHitWindow);
+        window.removeEventListener('notedetect:miss', onMissWindow);
         if (detector) {
             try { detector.destroy(); } catch (e) {}
             detector = null;
