@@ -2,6 +2,8 @@
 
 A Guitarcade-inspired 3D side-scrolling arcade mini-game plugin for [Slopsmith](https://github.com/byrongamatos/slopsmith). Play the next correct note from your chosen scale to dodge oncoming obstacles. Inspired by Rocksmith 2014's *Scale Runner / Scale Warriors*.
 
+![Scale Runner gameplay](scale-runner.png)
+
 ## Features
 
 - 3D side-scroller rendered with Three.js (reuses the Three.js bundled with Slopsmith core — no extra dependencies)
