@@ -478,12 +478,57 @@
         return m;
     }
 
+    // Debounce window so onset + onHit firing close together don't
+    // double-trigger a jump. Also acts as the minimum gap between
+    // consecutive jumps from rapid re-picks.
+    const JUMP_DEBOUNCE_S = 0.18;
+
     function triggerJump(intensity01) {
-        // Map 0..1 audio peak to 0.5..1.5 of the base v0. peak=0.5 is
-        // a "normal" strum giving the default jump height.
-        const scale = Math.max(0.5, Math.min(1.5, (intensity01 ?? 0.5) + 0.5));
+        if (gameClockSec - jumpStartTime < JUMP_DEBOUNCE_S) return;
+        // 0..1 audio peak → 0.7..2.0 of base v0. Mapping is intentionally
+        // generous because typical inputPeak in the engine sits in
+        // ~0.1..0.6 even on a confident strum (signal-chain attenuation +
+        // the meter's decaying peak — see note_detect/screen.js:2326-2332).
+        //   peak=0.0 → 0.7 → v0=4.2  → ~0.40 m   (soft hop)
+        //   peak=0.2 → 1.0 → v0=6.0  → ~0.82 m   (default)
+        //   peak=0.5 → 1.45 → v0=8.7 → ~1.72 m
+        //   peak=0.8 → 1.9 → v0=11.4 → ~2.95 m
+        //   peak≥1.0 clamped → v0=12 → ~3.27 m   (max leap)
+        const p = Math.max(0, Math.min(1, intensity01 ?? 0));
+        const scale = Math.max(0.7, Math.min(2.0, p * 1.5 + 0.7));
         jumpV0 = JUMP_V0_BASE * scale;
         jumpStartTime = gameClockSec;
+    }
+
+    // Raw pitch-onset polling. The engine's chart verifier waits for each
+    // note's timing window to close (~150 ms after strum) before finalizing
+    // a verdict, so onHit() fires 150–250 ms late — well past the threshold
+    // for feeling real-time. desktop.audio.getPitchDetection() returns the
+    // engine's continuous pitch (frequency / confidence / midiNote) per
+    // audio buffer; firing the jump on rising-edge onset gets visual
+    // feedback down to audio-buffer latency (~10-30 ms). Scoring stays on
+    // the chart-verdict path for correctness; the debounce above prevents
+    // the onset + verdict pair from double-jumping.
+    let _lastPitchValid = false;
+    let _pitchPending = false;
+    const PITCH_CONFIDENCE_MIN = 0.5;
+    function pollPitch() {
+        if (_pitchPending || gameState !== 'playing') return;
+        const desktop = window.slopsmithDesktop;
+        if (!desktop || !desktop.audio || typeof desktop.audio.getPitchDetection !== 'function') return;
+        _pitchPending = true;
+        desktop.audio.getPitchDetection().then(p => {
+            _pitchPending = false;
+            const valid = !!(p
+                && Number.isFinite(p.frequency) && p.frequency > 20
+                && Number.isFinite(p.confidence) && p.confidence >= PITCH_CONFIDENCE_MIN);
+            if (valid && !_lastPitchValid) {
+                // Rising edge — strike detected. Fire the jump now; the
+                // chart verdict will arrive a beat later and update score.
+                triggerJump(recentPeak(0.15));
+            }
+            _lastPitchValid = valid;
+        }).catch(() => { _pitchPending = false; });
     }
 
     function bobRunner(t) {
@@ -528,6 +573,7 @@
         bobRunner(gameClockSec);
         scrollGround();
         pollLevels();
+        pollPitch();
         updateTargetDegree();
         renderer.render(scene, camera);
 
@@ -835,6 +881,7 @@
         _lastTargetIdx = -2;   // force renderFretboard on first updateTargetDegree
         _judgedSeen.clear();   // start each run with a clean dedup window
         _levelHistory.length = 0;  // discard audio levels from any prior run
+        _lastPitchValid = false;   // reset onset edge detection
         hudEls.scaleKey.textContent = `${prefs.key} ${prefs.scale === 'minor_pent' ? 'minor pent' : 'major pent'} · ${diff.label}`;
         updateHud();
 
