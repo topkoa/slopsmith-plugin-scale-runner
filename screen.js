@@ -435,26 +435,65 @@
     }
 
     // Jump physics. On a hit we kick the runner straight up; gravity
-    // pulls it back down. JUMP_V0 + JUMP_G are tuned so airtime is just
-    // long enough to comfortably clear an obstacle entering the hit zone
-    // (V_FWD=8 m/s × 0.55 s ≈ 4.4 world units of travel) — that covers
-    // the ±150 ms timing window with margin on either side.
-    const JUMP_V0 = 6;         // initial upward velocity (m/s)
-    const JUMP_G  = 22;        // gravity (m/s²)
-    const JUMP_AIRTIME = (2 * JUMP_V0) / JUMP_G;
+    // pulls it back down. JUMP_V0_BASE + JUMP_G give the nominal arc;
+    // the actual v0 for each hit is scaled by the strum's audio peak so
+    // a soft strum = small hop, a hard strum = big leap. Peak height
+    // h = v0²/(2g), so v0=3→0.20m (hop), v0=6→0.82m (default),
+    // v0=9→1.84m (max).
+    const JUMP_V0_BASE = 6;    // nominal upward velocity (m/s)
+    const JUMP_G       = 22;   // gravity (m/s²)
     let jumpStartTime = -100;  // last hit time; arbitrary -inf marker
+    let jumpV0 = JUMP_V0_BASE; // v0 for the currently-active jump
 
-    function triggerJump() {
+    // Audio-level history populated by pollLevels(). On hit we query the
+    // peak across the recent window to size the jump.
+    const _levelHistory = [];      // [{ t: gameClockSec, peak: 0..1 }]
+    const _LEVEL_HISTORY_S = 1.0;  // keep ~1 s of samples
+    let _lvlPending = false;
+    function pollLevels() {
+        if (_lvlPending || gameState !== 'playing') return;
+        const desktop = window.slopsmithDesktop;
+        if (!desktop || !desktop.audio || typeof desktop.audio.getLevels !== 'function') return;
+        _lvlPending = true;
+        desktop.audio.getLevels().then(lvl => {
+            _lvlPending = false;
+            const peak = Number.isFinite(lvl && lvl.inputPeak) ? Math.max(0, Math.min(1, lvl.inputPeak)) : 0;
+            _levelHistory.push({ t: gameClockSec, peak });
+            // Trim — keep the most recent _LEVEL_HISTORY_S of samples.
+            while (_levelHistory.length && gameClockSec - _levelHistory[0].t > _LEVEL_HISTORY_S) {
+                _levelHistory.shift();
+            }
+        }).catch(() => { _lvlPending = false; });
+    }
+
+    // Peak audio level across the last `lookbackSec` seconds. Used to
+    // size each jump from the actual strike intensity.
+    function recentPeak(lookbackSec) {
+        const cutoff = gameClockSec - lookbackSec;
+        let m = 0;
+        for (let i = _levelHistory.length - 1; i >= 0; i--) {
+            if (_levelHistory[i].t < cutoff) break;
+            if (_levelHistory[i].peak > m) m = _levelHistory[i].peak;
+        }
+        return m;
+    }
+
+    function triggerJump(intensity01) {
+        // Map 0..1 audio peak to 0.5..1.5 of the base v0. peak=0.5 is
+        // a "normal" strum giving the default jump height.
+        const scale = Math.max(0.5, Math.min(1.5, (intensity01 ?? 0.5) + 0.5));
+        jumpV0 = JUMP_V0_BASE * scale;
         jumpStartTime = gameClockSec;
     }
 
     function bobRunner(t) {
         if (!runner) return;
         const e = t - jumpStartTime;
+        const airtime = (2 * jumpV0) / JUMP_G;
         let jumpY = 0;
-        if (e >= 0 && e < JUMP_AIRTIME) {
+        if (e >= 0 && e < airtime) {
             // Standard projectile arc: y(t) = v0 t − ½ g t²
-            jumpY = JUMP_V0 * e - 0.5 * JUMP_G * e * e;
+            jumpY = jumpV0 * e - 0.5 * JUMP_G * e * e;
         }
         // Bob fades during the jump so it doesn't shake the silhouette
         // at the top of the arc.
@@ -488,6 +527,7 @@
         advanceCoins(dt);
         bobRunner(gameClockSec);
         scrollGround();
+        pollLevels();
         updateTargetDegree();
         renderer.render(scene, camera);
 
@@ -701,7 +741,11 @@
             makeCoin(meta.mesh.position.clone());
             // Trigger the visual fade in advanceObstacles by marking judged.
         }
-        triggerJump();
+        // Strike intensity = max audio peak in the last 250 ms. That
+        // window covers the player's pick attack plus the ~50–150 ms
+        // engine processing latency between strum and event fire.
+        const intensity = recentPeak(0.25);
+        triggerJump(intensity);
         flash('#3fbf6f');
         updateHud();
         renderFretboard();
@@ -790,6 +834,7 @@
         lastFrameMs = performance.now();
         _lastTargetIdx = -2;   // force renderFretboard on first updateTargetDegree
         _judgedSeen.clear();   // start each run with a clean dedup window
+        _levelHistory.length = 0;  // discard audio levels from any prior run
         hudEls.scaleKey.textContent = `${prefs.key} ${prefs.scale === 'minor_pent' ? 'minor pent' : 'major pent'} · ${diff.label}`;
         updateHud();
 
