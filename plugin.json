@@ -1,0 +1,9 @@
+{
+  "id": "scale_runner",
+  "name": "Scale Runner",
+  "version": "0.1.0",
+  "private": false,
+  "script": "screen.js",
+  "screen": "screen.html",
+  "nav": { "label": "Scale Runner", "screen": "plugin-scale_runner" }
+}

@@ -1,0 +1,132 @@
+<div id="sr-root" class="fixed inset-0 z-40 bg-dark-900 text-gray-100 overflow-hidden">
+    <canvas id="sr-canvas" class="absolute inset-0 w-full h-full"></canvas>
+
+    <!-- Back button (always visible top-left except during play) -->
+    <button id="sr-back" class="absolute top-4 left-4 z-50 text-gray-400 hover:text-white text-sm flex items-center gap-1 transition">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg> Back
+    </button>
+
+    <!-- Microphone explainer (shown once on first start) -->
+    <div id="sr-mic-explainer" class="hidden absolute inset-0 z-30 flex items-center justify-center bg-dark-900/95">
+        <div class="bg-dark-700 border border-gray-800 rounded-2xl p-8 max-w-md text-center shadow-2xl">
+            <svg class="w-12 h-12 text-accent mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v4m-4 0h8M12 3a3 3 0 00-3 3v6a3 3 0 006 0V6a3 3 0 00-3-3z"/>
+            </svg>
+            <h2 class="text-2xl font-bold text-white mb-2">Microphone access</h2>
+            <p class="text-gray-400 text-sm mb-6">Scale Runner needs your microphone to hear what you're playing. Click <strong class="text-white">Allow</strong> when your browser prompts.</p>
+            <button id="sr-mic-continue" class="bg-accent hover:bg-accent/80 px-6 py-2 rounded-xl text-white font-semibold transition">Continue</button>
+        </div>
+    </div>
+
+    <!-- Start panel -->
+    <div id="sr-start" class="absolute inset-0 z-20 flex items-center justify-center bg-dark-900/90">
+        <div class="bg-dark-700/80 border border-gray-800 rounded-2xl p-8 w-full max-w-xl shadow-2xl backdrop-blur">
+            <h1 class="text-4xl font-bold text-white mb-1">Scale Runner</h1>
+            <p class="text-gray-500 text-sm mb-6">Play the next note in the scale to dodge each obstacle.</p>
+
+            <!-- Scale picker -->
+            <div class="mb-5">
+                <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Scale</div>
+                <div id="sr-scale-picker" class="flex gap-2">
+                    <button data-scale="minor_pent" class="sr-scale-btn flex-1 px-4 py-2 rounded-xl text-sm border transition">Minor pent</button>
+                    <button data-scale="major_pent" class="sr-scale-btn flex-1 px-4 py-2 rounded-xl text-sm border transition">Major pent</button>
+                </div>
+            </div>
+
+            <!-- Key picker -->
+            <div class="mb-5">
+                <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Key</div>
+                <div id="sr-key-picker" class="grid grid-cols-6 gap-1.5"></div>
+            </div>
+
+            <!-- Difficulty -->
+            <div class="mb-6">
+                <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Difficulty</div>
+                <div id="sr-diff-picker" class="flex gap-2">
+                    <button data-diff="easy"   class="sr-diff-btn flex-1 px-4 py-2 rounded-xl text-sm border transition">
+                        <div class="font-semibold">Easy</div>
+                        <div class="text-xs text-gray-500">2.5s · ±200ms · 5♥</div>
+                    </button>
+                    <button data-diff="medium" class="sr-diff-btn flex-1 px-4 py-2 rounded-xl text-sm border transition">
+                        <div class="font-semibold">Medium</div>
+                        <div class="text-xs text-gray-500">2.0s · ±150ms · 3♥</div>
+                    </button>
+                    <button data-diff="hard"   class="sr-diff-btn flex-1 px-4 py-2 rounded-xl text-sm border transition">
+                        <div class="font-semibold">Hard</div>
+                        <div class="text-xs text-gray-500">1.5s · ±100ms · 2♥</div>
+                    </button>
+                </div>
+            </div>
+
+            <button id="sr-start-btn" class="w-full bg-accent hover:bg-accent/80 px-6 py-3 rounded-xl text-white font-bold text-lg transition">Start</button>
+        </div>
+    </div>
+
+    <!-- In-game HUD overlay -->
+    <div id="sr-hud" class="hidden absolute inset-0 z-20 pointer-events-none">
+        <!-- Top-left: lives + score + combo -->
+        <div class="absolute top-4 left-4 right-4 flex items-start justify-between text-sm">
+            <div class="bg-dark-900/70 border border-gray-800 rounded-xl px-4 py-3 backdrop-blur">
+                <div id="sr-lives" class="text-2xl mb-1 text-red-400">♥♥♥</div>
+                <div class="text-xs text-gray-500">Score</div>
+                <div id="sr-score" class="text-xl font-bold text-white">0</div>
+                <div class="text-xs text-gray-500 mt-1">Combo</div>
+                <div id="sr-combo" class="text-lg font-semibold" style="color: #e8c040;">×0</div>
+            </div>
+            <div class="bg-dark-900/70 border border-gray-800 rounded-xl px-4 py-3 backdrop-blur text-right">
+                <div class="text-xs text-gray-500">Play next</div>
+                <div id="sr-target" class="text-5xl font-bold text-white">1</div>
+                <div id="sr-scale-key" class="text-xs text-gray-500 mt-1">A minor pent</div>
+            </div>
+        </div>
+        <!-- Hit/miss flash (full-screen tint) -->
+        <div id="sr-flash" class="absolute inset-0 pointer-events-none transition-opacity duration-150 opacity-0"></div>
+    </div>
+
+    <!-- Pause overlay -->
+    <div id="sr-pause" class="hidden absolute inset-0 z-30 flex items-center justify-center bg-dark-900/80 backdrop-blur-sm">
+        <div class="bg-dark-700 border border-gray-800 rounded-2xl p-8 max-w-sm text-center shadow-2xl">
+            <h2 class="text-3xl font-bold text-white mb-6">Paused</h2>
+            <div class="flex flex-col gap-3">
+                <button id="sr-resume-btn" class="bg-accent hover:bg-accent/80 px-6 py-2 rounded-xl text-white font-semibold transition">Resume</button>
+                <button id="sr-quit-btn" class="bg-dark-600 hover:bg-dark-500 px-6 py-2 rounded-xl text-gray-300 transition">Quit to Menu</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Game over -->
+    <div id="sr-gameover" class="hidden absolute inset-0 z-30 flex items-center justify-center bg-dark-900/90">
+        <div class="bg-dark-700 border border-gray-800 rounded-2xl p-8 max-w-md text-center shadow-2xl">
+            <h2 class="text-3xl font-bold text-white mb-1">Game Over</h2>
+            <p class="text-gray-500 text-sm mb-6">Final score</p>
+            <div class="text-6xl font-bold mb-6" style="color: #e8c040;"><span id="sr-go-score">0</span></div>
+            <div class="grid grid-cols-3 gap-3 text-sm mb-6">
+                <div><div class="text-gray-500 text-xs">Hits</div><div id="sr-go-hits" class="text-white font-semibold">0</div></div>
+                <div><div class="text-gray-500 text-xs">Misses</div><div id="sr-go-misses" class="text-white font-semibold">0</div></div>
+                <div><div class="text-gray-500 text-xs">Best combo</div><div id="sr-go-best" class="text-white font-semibold">0</div></div>
+            </div>
+            <div class="flex gap-3">
+                <button id="sr-retry-btn" class="flex-1 bg-accent hover:bg-accent/80 px-4 py-2 rounded-xl text-white font-semibold transition">Retry</button>
+                <button id="sr-menu-btn" class="flex-1 bg-dark-600 hover:bg-dark-500 px-4 py-2 rounded-xl text-gray-300 transition">Back to Menu</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Win -->
+    <div id="sr-win" class="hidden absolute inset-0 z-30 flex items-center justify-center bg-dark-900/90">
+        <div class="bg-dark-700 border border-gray-800 rounded-2xl p-8 max-w-md text-center shadow-2xl">
+            <h2 class="text-3xl font-bold text-white mb-1">You did it!</h2>
+            <p class="text-gray-500 text-sm mb-6">Finished the scale</p>
+            <div class="text-6xl font-bold mb-6" style="color: #e8c040;"><span id="sr-win-score">0</span></div>
+            <div class="grid grid-cols-3 gap-3 text-sm mb-6">
+                <div><div class="text-gray-500 text-xs">Hits</div><div id="sr-win-hits" class="text-white font-semibold">0</div></div>
+                <div><div class="text-gray-500 text-xs">Misses</div><div id="sr-win-misses" class="text-white font-semibold">0</div></div>
+                <div><div class="text-gray-500 text-xs">Accuracy</div><div id="sr-win-acc" class="text-white font-semibold">0%</div></div>
+            </div>
+            <div class="flex gap-3">
+                <button id="sr-again-btn" class="flex-1 bg-accent hover:bg-accent/80 px-4 py-2 rounded-xl text-white font-semibold transition">Play Again</button>
+                <button id="sr-harder-btn" class="flex-1 bg-dark-600 hover:bg-dark-500 px-4 py-2 rounded-xl text-gray-300 transition">Try Harder</button>
+            </div>
+        </div>
+    </div>
+</div>
