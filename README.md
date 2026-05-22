@@ -33,16 +33,20 @@ The folder name MUST be `scale_runner` (matching the plugin id). Restart the Slo
 1. Click **Scale Runner** in the plugins nav.
 2. Pick a scale (minor pent / major pent), key (C–B), and difficulty (Easy / Medium / Hard).
 3. Click **Start**. Allow microphone access on first launch.
-4. Watch obstacles approach. Each obstacle is labeled with a scale degree (1, b3, 5, ...). Play that note (any octave on standard tuning) before the obstacle reaches your runner.
-5. Hit = score + combo. Miss = lose a life. Lose all lives = game over.
+4. Obstacles approach from the right, each labeled with a scale degree (1, b3, 5, ...). Play that note to make the runner **jump**. The fretboard at the bottom of the screen shows the scale shape — the next-target dot glows gold.
+5. **Jump physics**: only the right note triggers a jump, and only from the ground. Pick intensity scales the jump height — a soft strum gives a small hop, a hard strum gives a big leap. You cannot re-jump in the air; commit to a strum and ride the arc.
+6. **Cleared vs collision**: when the obstacle reaches you, the runner has to be airborne high enough to clear it. A miss-timed or too-soft jump means the obstacle hits you.
+7. Cleared = score + combo. Collision = lose a life. Lose all lives = game over.
 
 ## Difficulty tiers
 
-| Tier   | Cadence | Hit window | Lives |
-|--------|---------|------------|-------|
-| Easy   | 2.5 s   | ±200 ms    | 5     |
-| Medium | 2.0 s   | ±150 ms    | 3     |
-| Hard   | 1.5 s   | ±100 ms    | 2     |
+| Tier   | Cadence between obstacles | Lives |
+|--------|---------------------------|-------|
+| Easy   | 2.5 s                     | 5     |
+| Medium | 2.0 s                     | 3     |
+| Hard   | 1.5 s                     | 2     |
+
+Difficulty only varies the cadence and the lives budget; the jump and collision physics are the same across tiers.
 
 ## License
 
