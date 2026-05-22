@@ -319,17 +319,23 @@
         materialsToDispose.push(runnerMat);
     }
 
+    // Obstacle box. Height tuned so a default jump (peak ~0.82 m above
+    // resting capsule center) just clears with a few cm of margin, while
+    // a soft hop (peak ~0.40 m) collides. The collision threshold in
+    // checkCollisions() matches this geometry exactly.
+    const OBSTACLE_H = 0.6;        // box height
+    const OBSTACLE_Y = OBSTACLE_H / 2;  // center y so bottom sits on ground
+    const OBSTACLE_TOP_Y = OBSTACLE_H;  // top edge in world coords
     function makeObstacle() {
         if (obstaclePool.length) return obstaclePool.pop();
-        const geo = new T.BoxGeometry(0.9, 1.2, 0.9);
+        const geo = new T.BoxGeometry(0.9, OBSTACLE_H, 0.9);
         const mat = new T.MeshStandardMaterial({ color: 0xa04040, emissive: 0x401010, roughness: 0.6 });
         const mesh = new T.Mesh(geo, mat);
         const sprite = new T.Sprite();
-        sprite.scale.set(1.2, 1.2, 1);
-        sprite.position.set(0, 1.2, 0);
+        sprite.scale.set(1.0, 1.0, 1);
+        sprite.position.set(0, OBSTACLE_H + 0.3, 0);
         mesh.add(sprite);
         mesh.userData.sprite = sprite;
-        // Track for disposal — pooled allocations created lazily over the run.
         geometriesToDispose.push(geo);
         materialsToDispose.push(mat);
         return mesh;
@@ -377,7 +383,14 @@
             if (gameClockSec < meta.spawnTime) break;
             const mesh = makeObstacle();
             // Spawn at +SPAWN_X (far right of camera), ground-level.
-            mesh.position.set(SPAWN_X, 0.6, 0);
+            // Box center y = OBSTACLE_H/2 so the box bottom sits on y=0.
+            mesh.position.set(SPAWN_X, OBSTACLE_Y, 0);
+            // Reset state from any prior life as a recycled obstacle —
+            // a previous run may have left it red + transparent.
+            mesh.material.color.setHex(0xa04040);
+            mesh.material.emissive.setHex(0x401010);
+            mesh.material.opacity = 1;
+            mesh.material.transparent = false;
             const isRoot = meta.degree === '1';
             const labelColor = isRoot ? '#e8c040' : '#ffffff';
             const sprite = mesh.userData.sprite;
@@ -385,6 +398,7 @@
             meta.mesh = mesh;
             meta.label = sprite;
             meta.spawned = true;
+            meta.lastX = SPAWN_X;
             scene.add(mesh);
             activeObstacles.push(meta);
             nextSpawnIdx++;
@@ -397,6 +411,7 @@
             const mesh = meta.mesh;
             if (!mesh) continue;
             // Side-scroller: obstacles travel in -X toward the runner.
+            meta.lastX = mesh.position.x;
             mesh.position.x -= V_FWD * dt;
             // Visual fade once judged
             if (meta.judged) {
@@ -407,6 +422,7 @@
             if (mesh.position.x < PASS_X - 4 || (meta.judged && mesh.material.opacity <= 0)) {
                 mesh.material.opacity = 1;
                 mesh.material.transparent = false;
+                mesh.material.color.setHex(0xa04040);
                 recycleObstacle(mesh);
                 meta.mesh = null;
                 meta.label = null;
@@ -415,6 +431,60 @@
             remaining.push(meta);
         }
         activeObstacles = remaining;
+    }
+
+    // Spatial collision check. When an obstacle's center crosses the
+    // runner's center (x=0), judge based on the runner's current y:
+    // if the capsule bottom is above the box top with margin, the runner
+    // cleared it — hit. Otherwise the obstacle hit them — miss.
+    function checkCollisions() {
+        if (!runner) return;
+        const CLEAR_MARGIN = 0.05;
+        // Capsule extends 1.0 below its center (radius 0.4 + half-length 0.6).
+        const RUNNER_HALF_HEIGHT = 1.0;
+        for (const meta of activeObstacles) {
+            if (meta.judged || !meta.mesh) continue;
+            const x = meta.mesh.position.x;
+            // First frame where the obstacle's center has crossed
+            // the runner's center, OR where it's about to be unjudgeable
+            // because it's nearly past the danger zone.
+            const crossed = (meta.lastX !== undefined && meta.lastX > 0 && x <= 0)
+                         || x < PASS_X;
+            if (!crossed) continue;
+            const runnerBottom = runner.position.y - RUNNER_HALF_HEIGHT;
+            if (runnerBottom > OBSTACLE_TOP_Y + CLEAR_MARGIN) {
+                judgeCleared(meta);
+            } else {
+                judgeCollision(meta);
+            }
+        }
+    }
+
+    function judgeCleared(meta) {
+        meta.judged = 'hit';
+        stats.combo++;
+        stats.hits++;
+        if (stats.combo > stats.bestCombo) stats.bestCombo = stats.combo;
+        stats.score += 100 * stats.combo;
+        if (meta.mesh) makeCoin(meta.mesh.position.clone());
+        flash('#3fbf6f');
+        updateHud();
+        renderFretboard();
+    }
+
+    function judgeCollision(meta) {
+        meta.judged = 'miss';
+        stats.combo = 0;
+        stats.misses++;
+        stats.lives--;
+        if (meta.mesh) {
+            meta.mesh.material.color.setHex(0x802020);
+            meta.mesh.material.emissive.setHex(0x200808);
+        }
+        flash('#bf3f3f');
+        updateHud();
+        renderFretboard();
+        if (stats.lives <= 0) showGameOver();
     }
 
     function advanceCoins(dt) {
@@ -434,16 +504,17 @@
         activeCoins = remaining;
     }
 
-    // Jump physics. On a hit we kick the runner straight up; gravity
-    // pulls it back down. JUMP_V0_BASE + JUMP_G give the nominal arc;
-    // the actual v0 for each hit is scaled by the strum's audio peak so
-    // a soft strum = small hop, a hard strum = big leap. Peak height
-    // h = v0²/(2g), so v0=3→0.20m (hop), v0=6→0.82m (default),
-    // v0=9→1.84m (max).
+    // Jump physics. Velocity-driven (vs. parametric arc) so re-picks while
+    // airborne BOOST height rather than snap-resetting back to ground —
+    // the player can hammer on the right note and stay aloft long enough
+    // for the obstacle to pass under them. JUMP_V0_BASE + JUMP_G give
+    // the nominal arc; v0 for each pick scales with strum intensity.
     const JUMP_V0_BASE = 6;    // nominal upward velocity (m/s)
     const JUMP_G       = 22;   // gravity (m/s²)
-    let jumpStartTime = -100;  // last hit time; arbitrary -inf marker
-    let jumpV0 = JUMP_V0_BASE; // v0 for the currently-active jump
+    const JUMP_GROUND_Y = 1.0; // runner's resting y (capsule center)
+    let runnerVy = 0;          // current vertical velocity (m/s)
+    let runnerY  = JUMP_GROUND_Y;  // current y position (capsule center)
+    let lastJumpAtSec = -100;  // for debounce; replaces jumpStartTime
 
     // Audio-level history populated by pollLevels(). On hit we query the
     // peak across the recent window to size the jump.
@@ -478,17 +549,22 @@
         return m;
     }
 
-    // Debounce window so onset + onHit firing close together don't
-    // double-trigger a jump. Also acts as the minimum gap between
-    // consecutive jumps from rapid re-picks.
-    const JUMP_DEBOUNCE_S = 0.18;
+    // Debounce — minimum gap between two jumps from rapid re-picks.
+    // Short enough that 16th notes at 240 bpm (60 ms) each register, but
+    // long enough that onset + chart-verdict (which we no longer listen
+    // to for jumping, but keep the safety net) won't double-fire.
+    const JUMP_DEBOUNCE_S = 0.07;
 
     function triggerJump(intensity01) {
-        if (gameClockSec - jumpStartTime < JUMP_DEBOUNCE_S) return;
+        // Only jump from the ground — re-picks mid-air are ignored. The
+        // player commits to a jump's height with their pick intensity and
+        // has to land before they can jump again.
+        if (runnerY > JUMP_GROUND_Y + 0.02) return;
+        if (gameClockSec - lastJumpAtSec < JUMP_DEBOUNCE_S) return;
         // 0..1 audio peak → 0.7..2.0 of base v0. Mapping is intentionally
-        // generous because typical inputPeak in the engine sits in
-        // ~0.1..0.6 even on a confident strum (signal-chain attenuation +
-        // the meter's decaying peak — see note_detect/screen.js:2326-2332).
+        // generous because typical inputPeak sits in ~0.1..0.6 even on a
+        // confident strum (signal-chain attenuation + the meter's decaying
+        // peak — see note_detect/screen.js:2326-2332).
         //   peak=0.0 → 0.7 → v0=4.2  → ~0.40 m   (soft hop)
         //   peak=0.2 → 1.0 → v0=6.0  → ~0.82 m   (default)
         //   peak=0.5 → 1.45 → v0=8.7 → ~1.72 m
@@ -496,8 +572,8 @@
         //   peak≥1.0 clamped → v0=12 → ~3.27 m   (max leap)
         const p = Math.max(0, Math.min(1, intensity01 ?? 0));
         const scale = Math.max(0.7, Math.min(2.0, p * 1.5 + 0.7));
-        jumpV0 = JUMP_V0_BASE * scale;
-        jumpStartTime = gameClockSec;
+        runnerVy = JUMP_V0_BASE * scale;
+        lastJumpAtSec = gameClockSec;
     }
 
     // Raw pitch-onset polling. The engine's chart verifier waits for each
@@ -521,29 +597,44 @@
             _pitchPending = false;
             const valid = !!(p
                 && Number.isFinite(p.frequency) && p.frequency > 20
-                && Number.isFinite(p.confidence) && p.confidence >= PITCH_CONFIDENCE_MIN);
+                && Number.isFinite(p.confidence) && p.confidence >= PITCH_CONFIDENCE_MIN
+                && Number.isFinite(p.midiNote) && p.midiNote >= 0);
             if (valid && !_lastPitchValid) {
-                // Rising edge — strike detected. Fire the jump now; the
-                // chart verdict will arrive a beat later and update score.
-                triggerJump(recentPeak(0.15));
+                // Rising-edge pitch onset — does the played note match the
+                // next target? Allow exact-MIDI or ±octave (pitch detectors
+                // commonly mis-octave on low-E open strings), so the player
+                // can practise the scale anywhere on the neck and still get
+                // a jump.
+                const idx = obstacleMeta.findIndex(m => !m.judged);
+                if (idx >= 0) {
+                    const expected = obstacleMeta[idx].midi;
+                    const detected = Math.round(p.midiNote);
+                    const diff = Math.abs(detected - expected);
+                    const matched = diff === 0 || diff === 12 || diff === 24;
+                    if (matched) {
+                        triggerJump(recentPeak(0.15));
+                    }
+                }
             }
             _lastPitchValid = valid;
         }).catch(() => { _pitchPending = false; });
     }
 
-    function bobRunner(t) {
+    // Integrate runner physics each frame. Velocity-driven model — gravity
+    // pulls runnerVy down, runnerY follows. Clamp at ground (y = JUMP_GROUND_Y)
+    // so the runner can't sink below the world. Idle bob is added on top
+    // when on/near the ground.
+    function updateRunner(dt, t) {
         if (!runner) return;
-        const e = t - jumpStartTime;
-        const airtime = (2 * jumpV0) / JUMP_G;
-        let jumpY = 0;
-        if (e >= 0 && e < airtime) {
-            // Standard projectile arc: y(t) = v0 t − ½ g t²
-            jumpY = jumpV0 * e - 0.5 * JUMP_G * e * e;
+        runnerVy -= JUMP_G * dt;
+        runnerY  += runnerVy * dt;
+        if (runnerY <= JUMP_GROUND_Y) {
+            runnerY  = JUMP_GROUND_Y;
+            runnerVy = 0;
         }
-        // Bob fades during the jump so it doesn't shake the silhouette
-        // at the top of the arc.
-        const bobAmp = jumpY > 0.05 ? 0 : 0.08;
-        runner.position.y = 1 + bobAmp * Math.sin(t * 8) + jumpY;
+        const airborne = runnerY > JUMP_GROUND_Y + 0.05;
+        const bobAmp = airborne ? 0 : 0.08;
+        runner.position.y = runnerY + bobAmp * Math.sin(t * 8);
     }
 
     function scrollGround() {
@@ -570,7 +661,8 @@
         spawnPending();
         advanceObstacles(dt);
         advanceCoins(dt);
-        bobRunner(gameClockSec);
+        updateRunner(dt, gameClockSec);
+        checkCollisions();
         scrollGround();
         pollLevels();
         pollPitch();
@@ -771,52 +863,23 @@
     function onHitWindow(e)  { onHit(e); }
     function onMissWindow(e) { onMiss(e); }
 
+    // Chart-verdict events from note_detect's engine verifier are
+    // diagnostic-only under the spatial-collision scoring model. Real
+    // judgment happens in checkCollisions() / judgeCleared() /
+    // judgeCollision(); these handlers just log so a future regression
+    // in note_detect alignment is still visible in the console.
     function onHit(e) {
         if (gameState !== 'playing') return;
         if (_seenJudgment(e.detail)) return;
         const d = e.detail;
-        console.log('[scale_runner] hit event', { noteTime: d.noteTime, note: d.note, detectedMidi: d.detectedMidi, expectedMidi: d.expectedMidi, confidence: d.confidence });
-        const meta = findObstacleForJudgment(d);
-        if (!meta) { console.warn('[scale_runner] hit had no matching obstacle for noteTime', d.noteTime); return; }
-        meta.judged = 'hit';
-        stats.combo++;
-        stats.hits++;
-        if (stats.combo > stats.bestCombo) stats.bestCombo = stats.combo;
-        stats.score += 100 * stats.combo;
-        if (meta.mesh) {
-            makeCoin(meta.mesh.position.clone());
-            // Trigger the visual fade in advanceObstacles by marking judged.
-        }
-        // Strike intensity = max audio peak in the last 250 ms. That
-        // window covers the player's pick attack plus the ~50–150 ms
-        // engine processing latency between strum and event fire.
-        const intensity = recentPeak(0.25);
-        triggerJump(intensity);
-        flash('#3fbf6f');
-        updateHud();
-        renderFretboard();
+        console.log('[scale_runner] verdict:hit', { noteTime: d.noteTime, detectedMidi: d.detectedMidi, expectedMidi: d.expectedMidi, confidence: d.confidence });
     }
 
     function onMiss(e) {
         if (gameState !== 'playing') return;
         if (_seenJudgment(e.detail)) return;
         const d = e.detail;
-        console.log('[scale_runner] miss event', { noteTime: d.noteTime, note: d.note, detectedMidi: d.detectedMidi, expectedMidi: d.expectedMidi, pitchError: d.pitchError });
-        const meta = findObstacleForJudgment(d);
-        if (!meta) { console.warn('[scale_runner] miss had no matching obstacle for noteTime', d.noteTime); return; }
-        meta.judged = 'miss';
-        stats.combo = 0;
-        stats.misses++;
-        stats.lives--;
-        if (meta.mesh) {
-            meta.mesh.material.color.setHex(0x802020);
-        }
-        flash('#bf3f3f');
-        updateHud();
-        renderFretboard();
-        if (stats.lives <= 0) {
-            showGameOver();
-        }
+        console.log('[scale_runner] verdict:miss', { noteTime: d.noteTime, detectedMidi: d.detectedMidi, expectedMidi: d.expectedMidi, pitchError: d.pitchError });
     }
 
     // ── HUD ───────────────────────────────────────────────────────────────
@@ -882,6 +945,10 @@
         _judgedSeen.clear();   // start each run with a clean dedup window
         _levelHistory.length = 0;  // discard audio levels from any prior run
         _lastPitchValid = false;   // reset onset edge detection
+        // Reset runner physics so a Retry starts grounded, not mid-fall.
+        runnerVy = 0;
+        runnerY = JUMP_GROUND_Y;
+        lastJumpAtSec = -100;
         hudEls.scaleKey.textContent = `${prefs.key} ${prefs.scale === 'minor_pent' ? 'minor pent' : 'major pent'} · ${diff.label}`;
         updateHud();
 
