@@ -80,11 +80,15 @@
         hard:   { cadence: 1.5, timingTol: 0.100, pitchTol: 40, lives: 2, label: 'Hard' },
     };
 
-    // ── World constants ───────────────────────────────────────────────────
+    // ── World constants (3D side-scroller, motion along X) ────────────────
+    // The runner stays fixed at the origin facing +X. Obstacles spawn at
+    // +SPAWN_X (far to the right) and travel in -X toward the runner.
+    // Camera is parked at +Z looking back at the X-Y plane, so the player
+    // sees the scene from the side.
     const V_FWD = 8;            // m/s — obstacle speed toward runner
-    const SPAWN_Z = -20;        // obstacles spawn this far ahead of runner
-    const HIT_Z = 0;            // runner sits at Z=0; obstacles trigger here
-    const PASS_Z = 1.5;         // beyond this, the obstacle has visibly passed
+    const SPAWN_X = 20;         // obstacles spawn this far to the runner's right
+    const HIT_X = 0;            // runner sits at X=0; obstacles trigger here
+    const PASS_X = -1.5;        // past this (further -X), the obstacle has passed
     const PREROLL_S = 2.5;      // time from game start to first obstacle arrival
     const OCTAVES = 2;          // number of scale octaves per run (10 notes pent)
 
@@ -258,7 +262,10 @@
         ctx.fillRect(32, 32, 32, 32);
         const tex = new T.CanvasTexture(cv);
         tex.wrapS = tex.wrapT = T.RepeatWrapping;
-        tex.repeat.set(20, 100);
+        // 50 tiles along the long (X-extending) axis, 2 across the short
+        // (Z-extending) axis. Tuned so a tile is ~1 world unit on the play
+        // axis — gives a clean sense of forward speed as the texture scrolls.
+        tex.repeat.set(50, 2);
         tex.anisotropy = 4;
         return tex;
     }
@@ -266,24 +273,33 @@
     function buildScene() {
         scene = new T.Scene();
         scene.background = new T.Color(0x0a0e14);
-        scene.fog = new T.Fog(0x0a0e14, 15, 50);
+        // Fog gates the far edge of the playfield so obstacles fade in from
+        // the right rather than popping at SPAWN_X. Distances are from the
+        // camera, which sits ~12 units away on +Z.
+        scene.fog = new T.Fog(0x0a0e14, 18, 38);
 
         camera = new T.PerspectiveCamera(60, 1, 0.1, 200);
-        camera.position.set(0, 3, 8);
-        camera.lookAt(0, 1.5, 0);
+        // Side view: camera parked on +Z looking at the X-Y play plane.
+        // The look-at target is shifted +X so the runner sits on the left
+        // third of the frame and the approaching obstacles get the right
+        // two-thirds — the classic side-scroller composition.
+        camera.position.set(0, 2.5, 11);
+        camera.lookAt(5, 1.5, 0);
 
         const dir = new T.DirectionalLight(0xffffff, 1.0);
-        dir.position.set(5, 10, 5);
+        // Key light from above-front-right (camera-relative), so the
+        // approaching obstacles get rim-lit on the side facing the player.
+        dir.position.set(4, 10, 6);
         scene.add(dir);
         scene.add(new T.AmbientLight(0xffffff, 0.4));
 
-        // Ground
-        const groundGeo = new T.PlaneGeometry(20, 500);
+        // Ground — long along X (direction of travel), narrow across Z.
+        const groundGeo = new T.PlaneGeometry(500, 20);
         const groundTex = makeCheckerTexture();
         const groundMat = new T.MeshStandardMaterial({ map: groundTex, roughness: 0.95, metalness: 0.05 });
         ground = new T.Mesh(groundGeo, groundMat);
         ground.rotation.x = -Math.PI / 2;
-        ground.position.z = -240;
+        ground.position.set(0, 0, 0);
         scene.add(ground);
         geometriesToDispose.push(groundGeo);
         materialsToDispose.push(groundMat);
@@ -355,7 +371,8 @@
             const meta = obstacleMeta[nextSpawnIdx];
             if (gameClockSec < meta.spawnTime) break;
             const mesh = makeObstacle();
-            mesh.position.set(0, 0.6, SPAWN_Z);
+            // Spawn at +SPAWN_X (far right of camera), ground-level.
+            mesh.position.set(SPAWN_X, 0.6, 0);
             const isRoot = meta.degree === '1';
             const labelColor = isRoot ? '#e8c040' : '#ffffff';
             const sprite = mesh.userData.sprite;
@@ -374,14 +391,15 @@
         for (const meta of activeObstacles) {
             const mesh = meta.mesh;
             if (!mesh) continue;
-            mesh.position.z += V_FWD * dt;
+            // Side-scroller: obstacles travel in -X toward the runner.
+            mesh.position.x -= V_FWD * dt;
             // Visual fade once judged
             if (meta.judged) {
                 mesh.material.opacity = Math.max(0, (mesh.material.opacity ?? 1) - dt * 4);
                 mesh.material.transparent = true;
             }
-            // Despawn once well past the runner OR fully faded.
-            if (mesh.position.z > PASS_Z + 4 || (meta.judged && mesh.material.opacity <= 0)) {
+            // Despawn once well past the runner (further -X) OR fully faded.
+            if (mesh.position.x < PASS_X - 4 || (meta.judged && mesh.material.opacity <= 0)) {
                 mesh.material.opacity = 1;
                 mesh.material.transparent = false;
                 recycleObstacle(mesh);
@@ -420,8 +438,15 @@
         // The ground itself is fixed; the tiled texture animates by
         // adjusting offset so we get an infinite-scroll illusion without
         // ever moving the mesh.
+        //
+        // The plane's U axis (texture.x) is along world X after the
+        // -PI/2 X-rotation. Positive offset shifts texture content in -U,
+        // which reads as the world moving in -X — i.e. the runner is
+        // moving in +X. Tuned so one repeat tile (~10 world units across
+        // the 500-wide plane / 50 tiles) scrolls past every 1/V_FWD * 10
+        // seconds, matching the obstacle speed.
         if (!ground || !ground.material.map) return;
-        ground.material.map.offset.y = -gameClockSec * (V_FWD / 5);
+        ground.material.map.offset.x = gameClockSec * (V_FWD / 10);
     }
 
     function frame(nowMs) {
