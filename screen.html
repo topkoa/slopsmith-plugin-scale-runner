@@ -81,6 +81,14 @@
         </div>
         <!-- Hit/miss flash (full-screen tint) -->
         <div id="sr-flash" class="absolute inset-0 pointer-events-none transition-opacity duration-150 opacity-0"></div>
+
+        <!-- Fretboard reference — shows the scale shape so the player
+             can see WHICH notes to play and from what fret. The next
+             target is highlighted; hits go green, misses red. -->
+        <div id="sr-fretboard" class="absolute left-1/2 -translate-x-1/2 bottom-4 bg-dark-900/80 border border-gray-800 rounded-xl px-4 py-3 backdrop-blur">
+            <div class="text-xs text-gray-500 uppercase tracking-wide mb-1 text-center">Scale shape</div>
+            <svg id="sr-fretboard-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
     </div>
 
     <!-- Pause overlay -->

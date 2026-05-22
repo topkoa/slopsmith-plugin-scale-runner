@@ -48,7 +48,11 @@
     function rootMidiForKey(keyName) {
         const idx = NOTE_NAMES.indexOf(keyName);
         // C..D# map to C3..D#3 (48..51); E..B map to E2..B2 (40..47).
-        return idx <= 3 ? (48 + idx) : (40 + idx);
+        // The earlier `40 + idx` form was off by 4 — it shoved every
+        // letter from E through B up to C#3..F#3, so picking "A" would
+        // chart MIDI 49 (C#3) instead of 45 (A2). The verifier had no
+        // chance of matching what the player actually struck.
+        return idx <= 3 ? (48 + idx) : (36 + idx);
     }
 
     function getScaleMidiSequence(rootMidi, intervalSet, octaves) {
@@ -144,6 +148,7 @@
     let nextSpawnIdx = 0;
     let gameState = 'menu';     // 'menu' | 'playing' | 'paused' | 'gameover' | 'win'
     let stats = { score: 0, combo: 0, bestCombo: 0, hits: 0, misses: 0, lives: 0 };
+    let priorIsPlaying = false; // restored on teardown / pause
 
     // ── DOM refs (set in bindUi) ──────────────────────────────────────────
     let panels = {};
@@ -472,13 +477,158 @@
         }
     }
 
+    let _lastTargetIdx = -2;
     function updateTargetDegree() {
-        const next = obstacleMeta.find(m => !m.judged);
-        if (!next) {
-            hudEls.target.textContent = '—';
-            return;
+        const idx = obstacleMeta.findIndex(m => !m.judged);
+        const next = idx >= 0 ? obstacleMeta[idx] : null;
+        hudEls.target.textContent = next ? next.degree : '—';
+        if (idx !== _lastTargetIdx) {
+            _lastTargetIdx = idx;
+            renderFretboard();
         }
-        hudEls.target.textContent = next.degree;
+    }
+
+    // ── Fretboard reference diagram ───────────────────────────────────────
+    // SVG-based fretboard showing where to play each scale note.
+    // Strings: low E (s=0) at top to high E (s=5) at bottom — matches the
+    // way most guitar tabs are drawn. Dots sit between fret-wires (or just
+    // behind the nut for open strings). Root degrees ('1') are gold;
+    // other degrees are blue. Hit dots go green, missed dots red, the
+    // current target glows gold-bright.
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    function _svgEl(tag, attrs) {
+        const e = document.createElementNS(SVG_NS, tag);
+        for (const k in attrs) e.setAttribute(k, attrs[k]);
+        return e;
+    }
+    function renderFretboard() {
+        const svg = srRoot && srRoot.querySelector('#sr-fretboard-svg');
+        if (!svg) return;
+        // Determine fret range. Always start at 0 (so open strings render
+        // before the nut), extend to the highest fret used + 1.
+        let maxFret = 0;
+        for (const m of obstacleMeta) {
+            const p = midiToStringFret(m.midi);
+            if (p.f > maxFret) maxFret = p.f;
+        }
+        const startFret = 0;
+        const endFret = Math.max(5, maxFret + 1);
+        const fretCount = endFret - startFret;
+
+        const stringSpacing = 16;
+        const fretSpacing = 40;
+        const padL = 36, padR = 16, padT = 10, padB = 22;
+        const w = padL + padR + fretSpacing * fretCount + 14;  // +14 for open-string column
+        const h = padT + padB + stringSpacing * 5;
+
+        svg.setAttribute('width', w);
+        svg.setAttribute('height', h);
+        svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+        svg.innerHTML = '';
+
+        // Helper: x-coord for a (fret-marker) — the dot for fret n sits
+        // midway between fret-wires n-1 and n. Open strings (fret 0) sit
+        // just left of the nut.
+        const openX = padL + 14;     // open-string column (left of nut)
+        const nutX = padL + 28;      // x of fret 0 (the nut line itself)
+        const fretX = (f) => nutX + (f - 0.5) * fretSpacing;  // midpoint between wires
+        const wireX = (f) => nutX + f * fretSpacing;          // fret-wire x
+        const stringY = (s) => padT + (5 - s) * stringSpacing; // s=0 (low E) at bottom
+
+        // String labels on the left
+        const stringNames = ['E', 'A', 'D', 'G', 'B', 'E'];
+        for (let s = 0; s < 6; s++) {
+            svg.appendChild(_svgEl('text', {
+                x: openX - 12, y: stringY(s) + 4,
+                fill: '#aaa', 'font-size': 11, 'text-anchor': 'middle',
+                'font-family': 'system-ui, sans-serif',
+            })).textContent = stringNames[s];
+        }
+
+        // Strings (horizontal lines from open column through last fret)
+        for (let s = 0; s < 6; s++) {
+            svg.appendChild(_svgEl('line', {
+                x1: openX, x2: wireX(endFret),
+                y1: stringY(s), y2: stringY(s),
+                stroke: '#666', 'stroke-width': s < 3 ? 1.5 : 1,
+            }));
+        }
+
+        // Nut (thick line at fret 0)
+        svg.appendChild(_svgEl('line', {
+            x1: nutX, x2: nutX,
+            y1: stringY(5) - 4, y2: stringY(0) + 4,
+            stroke: '#ddd', 'stroke-width': 3,
+        }));
+
+        // Fret wires (vertical, fret 1..endFret)
+        for (let f = 1; f <= endFret; f++) {
+            svg.appendChild(_svgEl('line', {
+                x1: wireX(f), x2: wireX(f),
+                y1: stringY(5) - 4, y2: stringY(0) + 4,
+                stroke: '#555', 'stroke-width': 1,
+            }));
+            // Fret number below
+            svg.appendChild(_svgEl('text', {
+                x: wireX(f) - fretSpacing / 2, y: h - 6,
+                fill: '#888', 'font-size': 10, 'text-anchor': 'middle',
+                'font-family': 'system-ui, sans-serif',
+            })).textContent = f;
+        }
+        // "0" label for open-string column
+        svg.appendChild(_svgEl('text', {
+            x: openX, y: h - 6,
+            fill: '#888', 'font-size': 10, 'text-anchor': 'middle',
+            'font-family': 'system-ui, sans-serif',
+        })).textContent = '0';
+
+        // The "next-to-play" obstacle gets the bright target glow.
+        const targetIdx = obstacleMeta.findIndex(m => !m.judged);
+
+        // Note dots — drawn last so they sit above the lines.
+        // Multiple syntheticNotes can map to the same (s,f) across octaves
+        // (e.g. the root in two octaves picks different strings via the
+        // heuristic, but in some keys overlaps happen). The dot color
+        // reflects the most-interesting state along the priority:
+        // target > miss > hit > unplayed.
+        const dotState = new Map();   // key = `${s}_${f}` → { meta, state }
+        function rank(s) { return s === 'target' ? 4 : s === 'miss' ? 3 : s === 'hit' ? 2 : 1; }
+        for (let i = 0; i < obstacleMeta.length; i++) {
+            const m = obstacleMeta[i];
+            const p = midiToStringFret(m.midi);
+            const k = `${p.s}_${p.f}`;
+            let state;
+            if (i === targetIdx) state = 'target';
+            else if (m.judged === 'miss') state = 'miss';
+            else if (m.judged === 'hit') state = 'hit';
+            else state = 'pending';
+            const cur = dotState.get(k);
+            if (!cur || rank(state) > rank(cur.state)) dotState.set(k, { meta: m, state, p });
+        }
+
+        for (const { meta, state, p } of dotState.values()) {
+            const x = p.f === 0 ? openX : fretX(p.f);
+            const y = stringY(p.s);
+            const isRoot = meta.degree === '1';
+            let fill, stroke, r;
+            if (state === 'target') { fill = '#e8c040'; stroke = '#fff7d0'; r = 9; }
+            else if (state === 'hit')   { fill = '#3fbf6f'; stroke = '#1a2a18'; r = 7; }
+            else if (state === 'miss')  { fill = '#bf3f3f'; stroke = '#2a1818'; r = 7; }
+            else if (isRoot)            { fill = '#e8c040'; stroke = '#1a1a1a'; r = 7; }
+            else                        { fill = '#4080e0'; stroke = '#1a1a1a'; r = 7; }
+            svg.appendChild(_svgEl('circle', {
+                cx: x, cy: y, r,
+                fill, stroke, 'stroke-width': state === 'target' ? 2 : 1,
+            }));
+            // Degree label inside the dot
+            svg.appendChild(_svgEl('text', {
+                x, y: y + 3,
+                fill: state === 'target' || isRoot ? '#1a1a1a' : '#fff',
+                'font-size': 9, 'text-anchor': 'middle',
+                'font-weight': 'bold',
+                'font-family': 'system-ui, sans-serif',
+            })).textContent = meta.degree;
+        }
     }
 
     // ── Note detection wiring ─────────────────────────────────────────────
@@ -494,28 +644,29 @@
     }
 
     // De-dupe between srRoot bubble and window dispatch (note_detect fires
-    // on both). Use the judgment's `judgedAt` as a stable key.
+    // on both per note_detect/screen.js:2624-2632). Tag by judgedAt+noteTime
+    // and apply the check at the top of every handler so BOTH paths dedup.
     const _judgedSeen = new Set();
     function _seenJudgment(d) {
         const k = (d.judgedAt ?? 0) + ':' + (d.noteTime ?? 0) + ':' + (d.matched ? 'H' : 'M');
         if (_judgedSeen.has(k)) return true;
         _judgedSeen.add(k);
-        // Bound the set so a long session doesn't leak.
         if (_judgedSeen.size > 256) {
             const it = _judgedSeen.values();
             _judgedSeen.delete(it.next().value);
         }
         return false;
     }
-    function onHitWindow(e)  { if (_seenJudgment(e.detail)) return; onHit(e); }
-    function onMissWindow(e) { if (_seenJudgment(e.detail)) return; onMiss(e); }
+    // Both window + srRoot paths funnel through onHit/onMiss; the dedup
+    // sits inside those handlers so a single judgment is processed once.
+    function onHitWindow(e)  { onHit(e); }
+    function onMissWindow(e) { onMiss(e); }
 
     function onHit(e) {
         if (gameState !== 'playing') return;
+        if (_seenJudgment(e.detail)) return;
         const d = e.detail;
-        console.log('[scale_runner] hit event', { noteTime: d.noteTime, note: d.note, detectedMidi: d.detectedMidi, expectedMidi: d.expectedMidi });
-        // Window-source events arrive without going through the bubble
-        // de-dupe, so we tag them at the source above.
+        console.log('[scale_runner] hit event', { noteTime: d.noteTime, note: d.note, detectedMidi: d.detectedMidi, expectedMidi: d.expectedMidi, confidence: d.confidence });
         const meta = findObstacleForJudgment(d);
         if (!meta) { console.warn('[scale_runner] hit had no matching obstacle for noteTime', d.noteTime); return; }
         meta.judged = 'hit';
@@ -529,12 +680,14 @@
         }
         flash('#3fbf6f');
         updateHud();
+        renderFretboard();
     }
 
     function onMiss(e) {
         if (gameState !== 'playing') return;
+        if (_seenJudgment(e.detail)) return;
         const d = e.detail;
-        console.log('[scale_runner] miss event', { noteTime: d.noteTime, note: d.note, detectedMidi: d.detectedMidi, expectedMidi: d.expectedMidi });
+        console.log('[scale_runner] miss event', { noteTime: d.noteTime, note: d.note, detectedMidi: d.detectedMidi, expectedMidi: d.expectedMidi, pitchError: d.pitchError });
         const meta = findObstacleForJudgment(d);
         if (!meta) { console.warn('[scale_runner] miss had no matching obstacle for noteTime', d.noteTime); return; }
         meta.judged = 'miss';
@@ -546,6 +699,7 @@
         }
         flash('#bf3f3f');
         updateHud();
+        renderFretboard();
         if (stats.lives <= 0) {
             showGameOver();
         }
@@ -610,6 +764,8 @@
         stats = { score: 0, combo: 0, bestCombo: 0, hits: 0, misses: 0, lives: diff.lives };
         gameClockSec = 0;
         lastFrameMs = performance.now();
+        _lastTargetIdx = -2;   // force renderFretboard on first updateTargetDegree
+        _judgedSeen.clear();   // start each run with a clean dedup window
         hudEls.scaleKey.textContent = `${prefs.key} ${prefs.scale === 'minor_pent' ? 'minor pent' : 'major pent'} · ${diff.label}`;
         updateHud();
 
@@ -684,15 +840,28 @@
             console.warn('[scale_runner] JUCE audio engine is not running. Open the 🎸 Audio panel, pick an input device, and click Start before launching Scale Runner.');
         }
 
+        // The engine's chart verifier passes `playing` (= !!window.slopsmith.isPlaying)
+        // to getNoteVerdicts() — see [note_detect/screen.js:4888,4916]. We're not
+        // running a song through audio.play(), so the global stays false unless we
+        // flip it. Engine-side gating against this flag was a strong candidate for
+        // the all-misses behaviour we saw. Flip it on for the game's lifetime and
+        // restore on teardown.
+        if (window.slopsmith) {
+            priorIsPlaying = !!window.slopsmith.isPlaying;
+            window.slopsmith.isPlaying = true;
+        }
+
         try {
             console.log('[scale_runner] calling detector.enable()…');
             await detector.enable();
             console.log('[scale_runner] detector enabled. isEnabled:', detector.isEnabled?.());
         } catch (e) {
             alert('Microphone permission is required to play. ' + (e?.message || ''));
+            if (window.slopsmith) window.slopsmith.isPlaying = priorIsPlaying;
             setState('start');
             return;
         }
+        renderFretboard();
 
         // Expose for browser-console debugging — `window._scaleRunnerDebug()`
         // dumps current game state.
@@ -751,6 +920,7 @@
         if (detector && typeof detector.disable === 'function') {
             try { detector.disable(); } catch (e) {}
         }
+        if (window.slopsmith) window.slopsmith.isPlaying = priorIsPlaying;
         gameState = 'menu';
         setState('start');
         restoreDefaultNoteDetect();
@@ -829,6 +999,7 @@
             try { detector.destroy(); } catch (e) {}
             detector = null;
         }
+        if (window.slopsmith) window.slopsmith.isPlaying = priorIsPlaying;
         restoreDefaultNoteDetect();
         // Pooled meshes share geometries/materials, so dispose only once each.
         for (const g of geometriesToDispose) { try { g.dispose(); } catch (e) {} }
