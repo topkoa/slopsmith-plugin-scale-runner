@@ -434,9 +434,32 @@
         activeCoins = remaining;
     }
 
+    // Jump physics. On a hit we kick the runner straight up; gravity
+    // pulls it back down. JUMP_V0 + JUMP_G are tuned so airtime is just
+    // long enough to comfortably clear an obstacle entering the hit zone
+    // (V_FWD=8 m/s × 0.55 s ≈ 4.4 world units of travel) — that covers
+    // the ±150 ms timing window with margin on either side.
+    const JUMP_V0 = 6;         // initial upward velocity (m/s)
+    const JUMP_G  = 22;        // gravity (m/s²)
+    const JUMP_AIRTIME = (2 * JUMP_V0) / JUMP_G;
+    let jumpStartTime = -100;  // last hit time; arbitrary -inf marker
+
+    function triggerJump() {
+        jumpStartTime = gameClockSec;
+    }
+
     function bobRunner(t) {
         if (!runner) return;
-        runner.position.y = 1 + 0.08 * Math.sin(t * 8);
+        const e = t - jumpStartTime;
+        let jumpY = 0;
+        if (e >= 0 && e < JUMP_AIRTIME) {
+            // Standard projectile arc: y(t) = v0 t − ½ g t²
+            jumpY = JUMP_V0 * e - 0.5 * JUMP_G * e * e;
+        }
+        // Bob fades during the jump so it doesn't shake the silhouette
+        // at the top of the arc.
+        const bobAmp = jumpY > 0.05 ? 0 : 0.08;
+        runner.position.y = 1 + bobAmp * Math.sin(t * 8) + jumpY;
     }
 
     function scrollGround() {
@@ -678,6 +701,7 @@
             makeCoin(meta.mesh.position.clone());
             // Trigger the visual fade in advanceObstacles by marking judged.
         }
+        triggerJump();
         flash('#3fbf6f');
         updateHud();
         renderFretboard();
